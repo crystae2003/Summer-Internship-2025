@@ -9,7 +9,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'AC Controller',
-      home: DynamicRemotePage(),
+      home: IRRemoteApp(),
       // home: BleSetupPage(),
 
       debugShowCheckedModeBanner: false,
