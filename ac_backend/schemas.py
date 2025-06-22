@@ -1,14 +1,15 @@
 from pydantic import BaseModel
+from typing import List
 
-class ACDeviceBase(BaseModel):
+class IRCodeBase(BaseModel):
     name: str
+    raw: List[int]
 
-class ACDeviceCreate(ACDeviceBase):
+class IRCodeCreate(IRCodeBase):
     pass
 
-class ACDeviceOut(ACDeviceBase):
+class IRCode(IRCodeBase):
     id: int
-    status: bool
 
     class Config:
         orm_mode = True

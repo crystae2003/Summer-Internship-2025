@@ -1,38 +1,57 @@
+#include <WiFiManager.h>       // Captive portal for Wi-Fi config
+#include <WebServer.h>         // HTTP server
+#include <HTTPClient.h>        // HTTP client for REST proxy
+#include <IRremoteESP8266.h>   // IR constants (kRawTick, etc.)
+#include <IRrecv.h>            // IR receiver
+#include <IRsend.h>            // IR transmitter
+#include <Preferences.h>       // NVS storage for Wi-Fi creds
+#include <SPIFFS.h>            // For reset wiping SPIFFS if desired
+#include <ArduinoJson.h>       // JSON serialization/parsing
 
-#include <WiFiManager.h>
-#include <WebServer.h>
-#include <IRremoteESP8266.h>
-#include <IRrecv.h>
-#include <IRsend.h>
-#include <Preferences.h>
-#include <SPIFFS.h>
-#include <ArduinoJson.h>
+// ─── CONFIG ────────────────────────────────────────────────────────────────
 
-#define RECV_PIN 23
+// IR hardware pins
+#define RECV_PIN    23
 #define IR_SEND_PIN 4
+
+// Your FastAPI + PostgreSQL server base URL
+const char *serverBase = "http://192.168.29.142:8000";
 
 IRrecv irrecv(RECV_PIN);
 IRsend irsend(IR_SEND_PIN);
 WebServer server(80);
 Preferences prefs;
 
+// Temporary decode result
 decode_results results;
+
+// ─── SETUP ─────────────────────────────────────────────────────────────────
 
 void setup() {
   Serial.begin(9600);
-  SPIFFS.begin(true);
+
+  // Optional: mount SPIFFS (only for reset endpoint)
+  if (!SPIFFS.begin(/*formatOnFail=*/false)) {
+    Serial.println("[WARN] SPIFFS mount failed");
+  }
+
+  // IR hardware init
   irrecv.enableIRIn();
   irsend.begin();
 
+  // Check if Wi-Fi creds are stored
   prefs.begin("wifi", true);
   bool configured = prefs.getBool("configured", false);
   prefs.end();
 
+  // If not, launch captive portal
   if (!configured) {
     WiFiManager wm;
     if (!wm.startConfigPortal("ESP32-Setup")) {
+      Serial.println("[ERROR] Config portal failed");
       ESP.restart();
     }
+    // Save credentials
     prefs.begin("wifi", false);
     prefs.putString("ssid", WiFi.SSID());
     prefs.putString("pass", WiFi.psk());
@@ -41,125 +60,170 @@ void setup() {
     ESP.restart();
   }
 
+  // Load saved Wi-Fi creds
   prefs.begin("wifi", true);
   String ssid = prefs.getString("ssid", "");
   String pass = prefs.getString("pass", "");
   prefs.end();
 
+  // Connect to Wi-Fi
   WiFi.begin(ssid.c_str(), pass.c_str());
+  Serial.print("[INFO] Connecting to Wi-Fi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
+  Serial.println();
+  Serial.printf("[INFO] Connected, IP: %s\n", WiFi.localIP().toString().c_str());
 
-  Serial.println("\nConnected: " + WiFi.localIP().toString());
+  // ── REST PROXY ENDPOINTS ───────────────────────────────────────
 
-  server.on("/", HTTP_GET, []() {
-    server.send(200, "text/html", R"rawliteral(
-      <h2>IR Remote Control</h2>
-      <form action="/learn">
-        <input name="name" placeholder="Enter Command Name">
-        <input type="submit" value="Learn IR">
-      </form><br>
-      <form action="/send">
-        <input name="name" placeholder="Command Name to Send">
-        <input type="submit" value="Send IR">
-      </form><br>
-      <a href="/list">View Saved Commands</a>
-    )rawliteral");
-  });
-
+  // LEARN: capture IR, then POST to remote /learn
   server.on("/learn", HTTP_GET, []() {
     if (!server.hasArg("name")) {
-      server.send(400, "text/plain", "Missing command name");
+      server.send(400, "text/plain", "Missing name");
       return;
     }
-
     String name = server.arg("name");
-    server.send(200, "text/plain", "Waiting for IR signal…");
 
-    unsigned long start = millis();
-    while (!irrecv.decode(&results)) {
-      if (millis() - start > 10000) {
-        Serial.println("⏰ Timeout");
-        return;
-      }
-      delay(50);
+    // capture IR
+    unsigned long t0 = millis();
+    while (!irrecv.decode(&results) && millis() - t0 < 10000) {
+      delay(20);
     }
-
-    DynamicJsonDocument doc(16384);
-    if (SPIFFS.exists("/codes.json")) {
-      File file = SPIFFS.open("/codes.json", "r");
-      deserializeJson(doc, file);
-      file.close();
+    if (results.decode_type == UNKNOWN) {
+      server.send(422, "text/plain", "No IR signal");
+      return;
     }
-
-    JsonArray arr = doc.createNestedArray(name);
-    for (int i = 1; i < results.rawlen; i++) {
-      arr.add(results.rawbuf[i] * kRawTick); // Convert to microseconds
-    }
-
-    File file = SPIFFS.open("/codes.json", "w");
-    serializeJsonPretty(doc, file);
-    file.close();
-
     irrecv.resume();
-    Serial.println("✅ Learned and saved as: " + name);
+
+    // build JSON payload
+    DynamicJsonDocument payload(8192);
+    payload["name"] = name;
+    JsonArray arr = payload.createNestedArray("raw");
+    for (size_t i = 1; i < results.rawlen; i++) {
+      arr.add(results.rawbuf[i] * kRawTick);
+    }
+    String body;
+    serializeJson(payload, body);
+
+    // HTTP POST to backend
+    HTTPClient http;
+    http.begin(String(serverBase) + "/learn");
+    http.addHeader("Content-Type", "application/json");
+    int code = http.POST(body);
+    String resp = http.getString();
+    http.end();
+
+    server.send(code, "text/plain", resp);
   });
 
+  // SEND: GET raw from backend, then transmit
   server.on("/send", HTTP_GET, []() {
     if (!server.hasArg("name")) {
-      server.send(400, "text/plain", "Missing command name");
+      server.send(400, "text/plain", "Missing name");
       return;
     }
     String name = server.arg("name");
-    if (!SPIFFS.exists("/codes.json")) {
-      server.send(404, "text/plain", "No stored IR codes");
+
+    // HTTP GET from backend
+    HTTPClient http;
+    http.begin(String(serverBase) + "/send?name=" + name);
+    int code = http.GET();
+    String resp = http.getString();
+    http.end();
+
+    if (code != 200) {
+      server.send(code, "text/plain", resp);
       return;
     }
 
-    File file = SPIFFS.open("/codes.json", "r");
-    DynamicJsonDocument doc(16384);
-    deserializeJson(doc, file);
-    file.close();
-
-    if (!doc.containsKey(name)) {
-      server.send(404, "text/plain", "Command not found");
+    // parse JSON
+    DynamicJsonDocument doc(8192);
+    if (deserializeJson(doc, resp)) {
+      server.send(500, "text/plain", "Invalid JSON");
       return;
     }
+    JsonArray arr = doc["raw"].as<JsonArray>();
 
-    JsonArray arr = doc[name];
-    uint16_t raw[arr.size()];
-    for (int i = 0; i < arr.size(); i++) raw[i] = arr[i];
+    // build raw array
+    size_t n = arr.size();
+    uint16_t raw[n];
+    for (size_t i = 0; i < n; i++) raw[i] = arr[i].as<uint16_t>();
 
-    irsend.sendRaw(raw, arr.size(), 38);
-    Serial.println("📤 Sent IR command: " + name);
+    // send IR
+    irsend.sendRaw(raw, n, 38);
     server.send(200, "text/plain", "Sent " + name);
   });
 
+  // LIST: proxy to backend
   server.on("/list", HTTP_GET, []() {
-    if (!SPIFFS.exists("/codes.json")) {
-      server.send(200, "application/json", "{}");
-      return;
-    }
-    File f = SPIFFS.open("/codes.json", "r");
-    String content = f.readString();
-    f.close();
-    server.send(200, "application/json", content);
+    HTTPClient http;
+    http.begin(String(serverBase) + "/list");
+    int code = http.GET();
+    String resp = http.getString();
+    http.end();
+    server.send(code, "application/json", resp);
   });
 
+  // DELETE: proxy to backend
+  server.on("/delete", HTTP_GET, []() {
+  if (!server.hasArg("name")) {
+    server.send(400, "text/plain", "Missing name");
+    return;
+  }
+  String name = server.arg("name");
+  // Build the URL with name query
+  String url = String(serverBase) + "/delete?name=" + name;
+  HTTPClient http;
+  http.begin(url);
+  // Send a proper HTTP DELETE
+  int code = http.sendRequest("DELETE", (uint8_t*)nullptr, 0);
+  String resp = http.getString();
+  http.end();
+  server.send(code, "text/plain", resp);
+});
+
+
+  // RENAME: proxy to backend
+  server.on("/rename", HTTP_GET, []() {
+    if (!server.hasArg("old") || !server.hasArg("new")) {
+      server.send(400, "text/plain", "Missing old or new");
+      return;
+    }
+    String oldName = server.arg("old");
+    String newName = server.arg("new");
+    String url = String(serverBase)
+                 + "/rename?old=" + oldName
+                 + "&new=" + newName;
+    HTTPClient http;
+    http.begin(url);
+    // Send an empty-body PUT
+    int code = http.sendRequest("PUT", String());
+    String resp = http.getString();
+    http.end();
+    server.send(code, "text/plain", resp);
+  });
+  
+
+  // RESET: clear Wi-Fi creds & factory reset
   server.on("/reset", HTTP_GET, []() {
     WiFiManager wm; wm.resetSettings();
-    prefs.begin("wifi", false); prefs.clear(); prefs.end();
-    if (SPIFFS.exists("/codes.json")) SPIFFS.remove("/codes.json");
-    server.send(200, "text/html", "<h3>Factory reset—rebooting...</h3>");
+    prefs.begin("wifi", false);
+    prefs.clear();
+    prefs.end();
+    server.send(200, "text/html",
+                "<h3>Factory reset… rebooting</h3>");
     delay(1000);
     ESP.restart();
   });
 
+  // start server
   server.begin();
-  Serial.println("HTTP server started.");
+  Serial.println("[INFO] HTTP server started");
 }
+
+// ─── LOOP ──────────────────────────────────────────────────────────────────
 
 void loop() {
   server.handleClient();
