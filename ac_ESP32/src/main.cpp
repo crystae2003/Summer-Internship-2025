@@ -141,7 +141,7 @@ void setup() {
       server.send(400, "text/plain", "Missing name");
       return;
     }
-    String name = urlencode("name");
+    String name = urlencode(server.arg("name"));
 
     // HTTP GET from backend
     HTTPClient http;

@@ -105,8 +105,9 @@ class _IRHomePageState extends State<IRHomePage> {
   }
 
   Future<void> _sendCommand(String name) async {
+
     final ip = _espIpController.text.trim();
-    final cmd = name.trim();
+    final cmd = Uri.encodeComponent(name.trim());
     try {
       final uri = Uri.http(ip, 'send', {'name': cmd});
       final res = await http.get(uri).timeout(const Duration(seconds: 5));
@@ -209,19 +210,23 @@ class _IRHomePageState extends State<IRHomePage> {
     await _renameCommand(trimmedOld, trimmedNew);
   }
 
-  Future<void> _renameCommand(String oldName, String newName) async {
-    final ip = _espIpController.text.trim();
-    try {
-      final uri = Uri.http(ip, 'rename', {'old': oldName, 'new': newName});
-      debugPrint('Rename URI → $uri');
-      final res = await http.get(uri).timeout(const Duration(seconds: 5));
-      debugPrint('◀ [rename] status=${res.statusCode} body=${res.body}');
-      _showSnack(res.body, isError: res.statusCode != 200);
-      await _refreshCommandList();
-    } catch (e) {
-      _showSnack('Error renaming: $e', isError: true);
-    }
+ Future<void> _renameCommand(String oldName, String newName) async {
+  final ip = _espIpController.text.trim();
+  try {
+    final encodedOld = Uri.encodeComponent(oldName.trim());
+    final encodedNew = Uri.encodeComponent(newName.trim());
+
+    final uri = Uri.parse('http://$ip/rename?old=$encodedOld&new=$encodedNew');
+    debugPrint('Rename URI → $uri');
+
+    final res = await http.get(uri).timeout(const Duration(seconds: 5));
+    debugPrint('◀ [rename] status=${res.statusCode} body=${res.body}');
+    _showSnack(res.body, isError: res.statusCode != 200);
+    await _refreshCommandList();
+  } catch (e) {
+    _showSnack('Error renaming: $e', isError: true);
   }
+}
 
   Future<void> _resetESP() async {
     final confirmed = await showDialog<bool>(
