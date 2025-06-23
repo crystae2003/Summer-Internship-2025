@@ -26,7 +26,24 @@ Preferences prefs;
 decode_results results;
 
 // ─── SETUP ─────────────────────────────────────────────────────────────────
-
+String urlencode(const String &s) {
+  String enc = "";
+  char c;
+  for (size_t i = 0; i < s.length(); i++) {
+    c = s[i];
+    if ( (c >= '0' && c <= '9')
+      || (c >= 'A' && c <= 'Z')
+      || (c >= 'a' && c <= 'z')
+      || c=='-' || c=='_' || c=='.' || c=='~') {
+      enc += c;
+    } else {
+      char buf[4];
+      sprintf(buf, "%%%02X", (uint8_t)c);
+      enc += buf;
+    }
+  }
+  return enc;
+}
 void setup() {
   Serial.begin(9600);
 
@@ -124,7 +141,7 @@ void setup() {
       server.send(400, "text/plain", "Missing name");
       return;
     }
-    String name = server.arg("name");
+    String name = urlencode("name");
 
     // HTTP GET from backend
     HTTPClient http;
@@ -165,24 +182,33 @@ void setup() {
     http.end();
     server.send(code, "application/json", resp);
   });
+  // RFC-3986 percent-encoder for query components
 
-  // DELETE: proxy to backend
-  server.on("/delete", HTTP_GET, []() {
+
+
+// DELETE: proxy to backend (percent-encode the name!)
+server.on("/delete", HTTP_GET, []() {
   if (!server.hasArg("name")) {
     server.send(400, "text/plain", "Missing name");
     return;
   }
   String name = server.arg("name");
-  // Build the URL with name query
-  String url = String(serverBase) + "/delete?name=" + name;
+
+  // percent-encode spaces and special chars
+  String encoded = urlencode(name);
+  String url = String(serverBase) + "/delete?name=" + encoded;
+
+  Serial.printf("[DEBUG] Forwarding DELETE to: %s\n", url.c_str());
+
   HTTPClient http;
   http.begin(url);
-  // Send a proper HTTP DELETE
-  int code = http.sendRequest("DELETE", (uint8_t*)nullptr, 0);
+  int code = http.sendRequest("DELETE", (uint8_t*)"", 0);
   String resp = http.getString();
   http.end();
+
   server.send(code, "text/plain", resp);
 });
+
 
 
   // RENAME: proxy to backend
@@ -194,8 +220,8 @@ void setup() {
     String oldName = server.arg("old");
     String newName = server.arg("new");
     String url = String(serverBase)
-                 + "/rename?old=" + oldName
-                 + "&new=" + newName;
+                 + "/rename?old=" + urlencode(oldName)
+                 + "&new=" + urlencode(newName);
     HTTPClient http;
     http.begin(url);
     // Send an empty-body PUT
@@ -217,6 +243,7 @@ void setup() {
     delay(1000);
     ESP.restart();
   });
+
 
   // start server
   server.begin();
