@@ -25,7 +25,6 @@ Preferences prefs;
 // Temporary decode result
 decode_results results;
 
-// ─── SETUP ─────────────────────────────────────────────────────────────────
 String urlencode(const String &s) {
   String enc = "";
   char c;
@@ -44,6 +43,10 @@ String urlencode(const String &s) {
   }
   return enc;
 }
+
+// ─── SETUP ────────────────────────────────────────────────────────────────
+
+
 void setup() {
   Serial.begin(9600);
   Serial.println("[BOOT] Starting ESP32 setup");
