@@ -1,498 +1,209 @@
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
+import 'package:mqtt_client/mqtt_client.dart';
+import 'package:mqtt_client/mqtt_server_client.dart';
 import 'dart:convert';
 
-void main() => runApp(const IRRemoteApp());
+void main() => runApp(const IRApp());
 
-class IRRemoteApp extends StatelessWidget {
-  const IRRemoteApp({super.key});
-
+class IRApp extends StatelessWidget {
+  const IRApp({super.key});
   @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'ESP32 IR Controller',
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF1565C0),
-          brightness: Brightness.light,
-        ),
-        appBarTheme: const AppBarTheme(
-          centerTitle: true,
-          elevation: 0,
-          backgroundColor: Colors.transparent,
-        ),
-        cardTheme: CardTheme(
-          elevation: 0,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          color: Colors.white,
-        ),
-        inputDecorationTheme: InputDecorationTheme(
-          filled: true,
-          fillColor: Colors.grey.shade50,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide.none,
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFF1565C0), width: 2),
-          ),
-          contentPadding: const EdgeInsets.all(16),
-        ),
-        elevatedButtonTheme: ElevatedButtonThemeData(
-          style: ElevatedButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            elevation: 0,
-          ),
-        ),
-      ),
-      home: const IRHomePage(),
-    );
-  }
+  Widget build(BuildContext context) => MaterialApp(
+        title: 'IR MQTT Control',
+        home: const IRHome(),
+        debugShowCheckedModeBanner: false,
+      );
 }
 
-class IRHomePage extends StatefulWidget {
-  const IRHomePage({super.key});
+class IRHome extends StatefulWidget {
+  const IRHome({super.key});
   @override
-  State<IRHomePage> createState() => _IRHomePageState();
+  State<IRHome> createState() => _IRHomeState();
 }
 
-class _IRHomePageState extends State<IRHomePage> {
-  final _espIpController = TextEditingController(text: '192.168.29.230');
-  final _commandController = TextEditingController();
-  List<String> commands = [];
-  bool isLoading = false;
-  bool isConnected = false;
+class _IRHomeState extends State<IRHome> {
+  late final MqttServerClient _client;
+  Map<String, dynamic> _commands = {};
 
   @override
   void initState() {
     super.initState();
-    _refreshCommandList();
-  }
-
-  @override
-  void dispose() {
-    _espIpController.dispose();
-    _commandController.dispose();
-    super.dispose();
-  }
-
-Future<void> _apiCall(String endpoint, [Map<String, String>? params]) async {
-  final ip = _espIpController.text.trim();
-  try {
-    final uri = Uri.http(ip, endpoint, params);
-    print('DEBUG: Sending GET to $uri'); // DEBUG
-    final res = await http.get(uri).timeout(const Duration(seconds: 5));
-    print('DEBUG: Response [${res.statusCode}] - ${res.body}'); // DEBUG
-
-    if (endpoint == 'list' && res.statusCode == 200) {
-      final List<dynamic> list = json.decode(res.body);
-      setState(() {
-        commands = list.map((e) => e['name'] as String).toList();
-        isConnected = true;
-      });
-      print('DEBUG: Command list updated (${commands.length} commands)'); // DEBUG
-    } else {
-      _showSnack(res.body, isError: res.statusCode != 200);
-      if (endpoint == 'learn' || endpoint == 'delete' || endpoint == 'rename') {
-        print('DEBUG: Refreshing command list after $endpoint'); // DEBUG
-        await _refreshCommandList();
-      }
-    }
-  } catch (e) {
-    print('DEBUG: Exception during $endpoint call → $e'); // DEBUG
-    if (endpoint == 'list') setState(() => isConnected = false);
-    _showSnack('Connection error', isError: true);
-  }
-}
-
-Future<void> _learnCommand() async {
-  final cmd = _commandController.text.trim();
-  if (cmd.isEmpty) {
-    _showSnack('Please enter command name', isError: true);
-    print('DEBUG: Command name was empty on Learn'); // DEBUG
-    return;
-  }
-  print('DEBUG: Learning command → $cmd'); // DEBUG
-  setState(() => isLoading = true);
-  final prevText = _commandController.text;
-  await _apiCall('learn', {'name': cmd});
-  if (isConnected) _commandController.clear();
-  else _commandController.text = prevText; // restore it if learning failed
+    _client = MqttServerClient('192.168.29.142', 'flutterClient')
+      ..port = 1883
+      ..logging(on: false)
+      ..connectionMessage = MqttConnectMessage()
+          .withClientIdentifier('flutterClient')
+          .authenticateAs('hema', '@hema.')
+          .startClean();
+    _client.onConnected = _onConnected;
+    _client.onDisconnected = () => setState(() => _commands.clear());
   
-  setState(() => isLoading = false);
-}
-
-Future<void> _sendCommand(String name) async {
-  print('DEBUG: Sending command → $name'); // DEBUG
-  await _apiCall('send', {'name': Uri.encodeComponent(name)});
-}
-
-Future<void> _refreshCommandList() async {
-  print('DEBUG: Refreshing command list...'); // DEBUG
-  setState(() => isLoading = true);
-  await _apiCall('list');
-  setState(() => isLoading = false);
-}
-
-Future<void> _deleteCommand(String name) async {
-  print('DEBUG: Deleting command → $name'); // DEBUG
-  await _apiCall('delete', {'name': Uri.encodeComponent(name)});
-}
-
-Future<void> _renameCommand(String oldName, String newName) async {
-  print('DEBUG: Renaming command → $oldName → $newName'); // DEBUG
-  await _apiCall('rename', {
-    'old': Uri.encodeComponent(oldName),
-    'new': Uri.encodeComponent(newName)
-  });
-}
-
-Future<void> _renameDialog(String oldName) async {
-  final ctrl = TextEditingController(text: oldName);
-  final newName = await showDialog<String>(
-    context: context,
-    builder: (context) => AlertDialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      title: Text('Rename Command', style: TextStyle(color: Colors.grey.shade800)),
-      content: TextField(
-        controller: ctrl,
-        decoration: InputDecoration(
-          labelText: 'New name',
-          prefixIcon: Icon(Icons.edit, color: Theme.of(context).primaryColor),
-        ),
-        onSubmitted: (_) => Navigator.pop(context, ctrl.text.trim()),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(context, ctrl.text.trim()),
-          child: const Text('Rename'),
-        ),
-      ],
-    ),
-  );
-
-
-  if (newName != null && newName.trim().isNotEmpty && newName != oldName) {
-    print('DEBUG: Renaming confirmed: $oldName → $newName'); // DEBUG
-    await _renameCommand(oldName, newName.trim());
-  } else {
-    print('DEBUG: Rename cancelled or unchanged'); // DEBUG
+    _connect();
   }
-}
 
-Future<void> _resetESP() async {
-  final confirmed = await showDialog<bool>(
-    context: context,
-        builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Row(
-          children: [
-            Icon(Icons.warning_amber, color: Colors.orange.shade600),
-            const SizedBox(width: 8),
-            const Text('Reset ESP32'),
-          ],
-        ),
-        content: const Text('This will reset WiFi settings. You\'ll need to reconnect.'),
+  Future<void> _connect() async {
+    try {
+      await _client.connect();
+    } catch (_) {}
+  }
+
+  void _onConnected() {
+    // Subscribe to status and commands topics
+    _client.subscribe('home/ac/status', MqttQos.atLeastOnce);
+    _client.subscribe('home/ac/available_cmds', MqttQos.atLeastOnce);
+
+    _client.updates?.listen((events) {
+      final rec   = events[0];
+      final topic = rec.topic;
+      final msg   = rec.payload as MqttPublishMessage;
+      final raw   = MqttPublishPayload.bytesToStringAsString(msg.payload.message);
+
+      if (topic == 'home/ac/available_cmds') {
+        try {
+          var decoded = jsonDecode(raw);
+          if (decoded is String) decoded = jsonDecode(decoded);
+          setState(() => _commands = decoded as Map<String, dynamic>);
+        } catch (_) {
+          setState(() => _commands = {});
+        }
+      } else if (topic == 'home/ac/status') {
+        // refresh list after delete/rename/learn
+        if (raw.startsWith('Deleted') ||
+            raw.startsWith('Renamed') ||
+            raw.startsWith('Learned')) {
+          Future.delayed(const Duration(milliseconds: 500), _requestList);
+        }
+      }
+    });
+
+    // initial list fetch
+    _requestList();
+  }
+
+  void _onMessage(List<MqttReceivedMessage<MqttMessage>> events) {}
+
+  void _requestList() {
+    final b = MqttClientPayloadBuilder()..addString('');
+    _client.publishMessage('home/ac/list', MqttQos.atLeastOnce, b.payload!);
+  }
+
+  void _send(String name) {
+    final b = MqttClientPayloadBuilder()..addString(jsonEncode({'name': name}));
+    _client.publishMessage('home/ac/send', MqttQos.atLeastOnce, b.payload!);
+  }
+
+  void _delete(String name) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete Command'),
+        content: Text('Are you sure you want to delete "$name"?'),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red.shade600),
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Reset'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(onPressed: () {
+            final b = MqttClientPayloadBuilder()..addString(jsonEncode({'name': name}));
+            _client.publishMessage('home/ac/delete', MqttQos.atLeastOnce, b.payload!);
+            Navigator.pop(ctx);
+          }, child: const Text('Delete')),
         ],
       ),
     );
-
-  if (confirmed == true) {
-    print('DEBUG: Resetting ESP32...'); // DEBUG
-    await _apiCall('reset');
-  } else {
-    print('DEBUG: Reset cancelled'); // DEBUG
   }
-}
 
-
-  void _showSnack(String msg, {bool isError = false}) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            Icon(
-              isError ? Icons.error_outline : Icons.check_circle_outline,
-              color: Colors.white,
-              size: 20,
-            ),
-            const SizedBox(width: 12),
-            Expanded(child: Text(msg)),
-          ],
+  void _rename(String oldName) async {
+    final ctrl = TextEditingController(text: oldName);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Rename Command'),
+        content: TextField(
+          controller: ctrl,
+          decoration: const InputDecoration(hintText: 'New name'),
+          autofocus: true,
         ),
-        backgroundColor: isError ? Colors.red.shade600 : Colors.green.shade600,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        margin: const EdgeInsets.all(16),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(onPressed: () {
+            final text = ctrl.text.trim();
+            if (text.isNotEmpty && text != oldName) {
+              Navigator.pop(ctx, text);
+            }
+          }, child: const Text('Rename')),
+        ],
       ),
     );
+    if (newName != null) {
+      final b = MqttClientPayloadBuilder()
+        ..addString(jsonEncode({'old': oldName, 'new': newName}));
+      _client.publishMessage('home/ac/rename', MqttQos.atLeastOnce, b.payload!);
+    }
+  }
+
+  Future<void> _learnNew() async {
+    final ctrl = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('New command name'),
+        content: TextField(controller: ctrl, decoration: const InputDecoration(hintText: 'e.g. POWER'), autofocus: true),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(onPressed: () {
+            final text = ctrl.text.trim();
+            if (text.isNotEmpty) Navigator.pop(ctx, text);
+          }, child: const Text('OK')),
+        ],
+      ),
+    );
+    if (name != null) {
+      final b = MqttClientPayloadBuilder()..addString(jsonEncode({'name': name}));
+      _client.publishMessage('home/ac/learn', MqttQos.atLeastOnce, b.payload!);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final names = _commands.keys.toList();
     return Scaffold(
-      backgroundColor: Colors.grey.shade50,
       appBar: AppBar(
-        title: const Text('IR Controller', style: TextStyle(fontWeight: FontWeight.w600)),
-        actions: [
-          Container(
-            margin: const EdgeInsets.only(right: 16),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: isConnected ? Colors.green.shade50 : Colors.red.shade50,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                color: isConnected ? Colors.green.shade200 : Colors.red.shade200,
-              ),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.circle,
-                  color: isConnected ? Colors.green.shade600 : Colors.red.shade600,
-                  size: 8,
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  isConnected ? 'Online' : 'Offline',
-                  style: TextStyle(
-                    color: isConnected ? Colors.green.shade700 : Colors.red.shade700,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
+        title: const Text('IR Commands'),
+        actions: [ IconButton(icon: const Icon(Icons.refresh), onPressed: _requestList) ],
       ),
-      body: RefreshIndicator(
-        onRefresh: _refreshCommandList,
-        child: SingleChildScrollView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            children: [
-              // Connection Card
-              _buildCard(
-                icon: Icons.wifi_rounded,
-                title: 'Connection',
-                child: Column(
-                  children: [
-                    TextField(
-                      controller: _espIpController,
-                      decoration: const InputDecoration(
-                        labelText: 'ESP32 IP Address',
-                        prefixIcon: Icon(Icons.router),
-                        hintText: '192.168.1.100',
-                      ),
+      body: names.isEmpty
+          ? const Center(child: Text('No commands yet'))
+          : ListView.builder(
+              padding: const EdgeInsets.all(16),
+              itemCount: names.length,
+              itemBuilder: (ctx, i) {
+                final cmd = names[i];
+                return Card(
+                  margin: const EdgeInsets.symmetric(vertical: 4),
+                  child: ListTile(
+                    title: Text(cmd.toUpperCase()),
+                    leading: IconButton(
+                      icon: const Icon(Icons.send),
+                      onPressed: () => _send(cmd),
                     ),
-                    const SizedBox(height: 16),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: isLoading ? null : _refreshCommandList,
-                        icon: isLoading 
-                          ? const SizedBox(
-                              width: 16, height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.refresh_rounded),
-                        label: Text(isLoading ? 'Connecting...' : 'Test Connection'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Theme.of(context).primaryColor,
-                          foregroundColor: Colors.white,
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.edit),
+                          onPressed: () => _rename(cmd),
                         ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              
-              const SizedBox(height: 16),
-              
-              // Learn Command Card
-              _buildCard(
-                icon: Icons.add_circle_outline,
-                title: 'Learn Command',
-                child: Column(
-                  children: [
-                    TextField(
-                      controller: _commandController,
-                      decoration: const InputDecoration(
-                        labelText: 'Command Name',
-                        prefixIcon: Icon(Icons.label_outline),
-                        hintText: 'e.g., TV Power, Volume Up',
-                      ),
-                      onSubmitted: (_) => _learnCommand(),
-                    ),
-                    const SizedBox(height: 16),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: isLoading ? null : _learnCommand,
-                        icon: const Icon(Icons.school_outlined),
-                        label: const Text('Learn'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.green.shade600,
-                          foregroundColor: Colors.white,
+                        IconButton(
+                          icon: const Icon(Icons.delete),
+                          onPressed: () => _delete(cmd),
                         ),
-                      ),
+                      ],
                     ),
-                  ],
-                ),
-              ),
-              
-              const SizedBox(height: 16),
-              
-              // Commands List
-              _buildCard(
-                icon: Icons.list_rounded,
-                title: 'Commands (${commands.length})',
-                child: isLoading
-                  ? const Center(child: CircularProgressIndicator())
-                  : commands.isEmpty
-                    ? _buildEmptyState()
-                    : _buildCommandsList(),
-              ),
-              
-              const SizedBox(height: 16),
-              
-              // Reset Button
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  onPressed: _resetESP,
-                  icon: const Icon(Icons.restart_alt),
-                  label: const Text('Reset ESP32'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.red.shade600,
-                    side: BorderSide(color: Colors.red.shade300),
-                    padding: const EdgeInsets.symmetric(vertical: 16),
                   ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCard({required IconData icon, required String title, required Widget child}) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(icon, color: Theme.of(context).primaryColor, size: 24),
-                const SizedBox(width: 12),
-                Text(
-                  title,
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-                ),
-              ],
+                );
+              },
             ),
-            const SizedBox(height: 16),
-            child,
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildEmptyState() {
-    return Container(
-      padding: const EdgeInsets.all(32),
-      child: Column(
-        children: [
-          Icon(Icons.settings_remote, size: 64, color: Colors.grey.shade300),
-          const SizedBox(height: 16),
-          Text(
-            'No Commands Yet',
-            style: TextStyle(fontSize: 18, color: Colors.grey.shade600, fontWeight: FontWeight.w500),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Learn your first IR command above',
-            style: TextStyle(color: Colors.grey.shade500),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildCommandsList() {
-    return ListView.separated(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      itemCount: commands.length,
-      separatorBuilder: (_, __) => Divider(color: Colors.grey.shade200, height: 1),
-      itemBuilder: (_, i) {
-        final cmd = commands[i];
-        return ListTile(
-          contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
-          leading: Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: Theme.of(context).primaryColor.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(
-              Icons.settings_remote,
-              color: Theme.of(context).primaryColor,
-              size: 20,
-            ),
-          ),
-          title: Text(cmd, style: const TextStyle(fontWeight: FontWeight.w500)),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _buildActionButton(Icons.edit, Colors.blue, () => _renameDialog(cmd)),
-              _buildActionButton(Icons.delete, Colors.red, () => _deleteCommand(cmd)),
-              _buildActionButton(Icons.send, Colors.green, () => _sendCommand(cmd)),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildActionButton(IconData icon, Color color, VoidCallback onPressed) {
-    return Container(
-      margin: const EdgeInsets.only(left: 4),
-      child: Material(
-        color: color.withOpacity(0.1),
-        borderRadius: BorderRadius.circular(8),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(8),
-          onTap: onPressed,
-          child: Padding(
-            padding: const EdgeInsets.all(8),
-            child: Icon(icon, color: color, size: 18),
-          ),
-        ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _learnNew,
+        child: const Icon(Icons.add),
       ),
     );
   }
