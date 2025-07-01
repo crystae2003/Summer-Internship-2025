@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"name": "ac_ESP32",
+			"path": "../../ac_ESP32"
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"typeinfo": "cpp"
+		}
+	}
+}

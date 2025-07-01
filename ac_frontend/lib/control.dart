@@ -3,207 +3,164 @@ import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 import 'dart:convert';
 
-void main() => runApp(const IRApp());
+// void main() => runApp(const IRControllerApp());
 
-class IRApp extends StatelessWidget {
-  const IRApp({super.key});
+class IRControllerApp extends StatelessWidget {
+  const IRControllerApp({super.key});
   @override
-  Widget build(BuildContext context) => MaterialApp(
-        title: 'IR MQTT Control',
-        home: const IRHome(),
-        debugShowCheckedModeBanner: false,
-      );
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'IR MQTT Controller',
+      home: const IRHomePage(),
+      debugShowCheckedModeBanner: false,
+    );
+  }
 }
 
-class IRHome extends StatefulWidget {
-  const IRHome({super.key});
+class IRHomePage extends StatefulWidget {
+  const IRHomePage({super.key});
   @override
-  State<IRHome> createState() => _IRHomeState();
+  State<IRHomePage> createState() => _IRHomePageState();
 }
 
-class _IRHomeState extends State<IRHome> {
+class _IRHomePageState extends State<IRHomePage> {
   late final MqttServerClient _client;
-  Map<String, dynamic> _commands = {};
+  String _status = 'Connecting…';
+  List<String> _commands = [];
 
   @override
   void initState() {
     super.initState();
+    _setupMqtt();
+    _connect();
+  }
+
+  void _setupMqtt() {
     _client = MqttServerClient('192.168.29.142', 'flutterClient')
       ..port = 1883
       ..logging(on: false)
+      ..keepAlivePeriod = 20
       ..connectionMessage = MqttConnectMessage()
           .withClientIdentifier('flutterClient')
           .authenticateAs('hema', '@hema.')
           .startClean();
-    _client.onConnected = _onConnected;
-    _client.onDisconnected = () => setState(() => _commands.clear());
-  
-    _connect();
+
+    _client.onConnected    = _onConnected;
+    _client.onDisconnected = _onDisconnected;
+    _client.updates?.listen(_onMessage);
   }
 
   Future<void> _connect() async {
     try {
       await _client.connect();
-    } catch (_) {}
+    } catch (e) {
+      setState(() => _status = 'MQTT connect failed');
+    }
   }
 
   void _onConnected() {
-    // Subscribe to status and commands topics
+    setState(() => _status = 'Connected');
     _client.subscribe('home/ac/status', MqttQos.atLeastOnce);
     _client.subscribe('home/ac/available_cmds', MqttQos.atLeastOnce);
-
-    _client.updates?.listen((events) {
-      final rec   = events[0];
-      final topic = rec.topic;
-      final msg   = rec.payload as MqttPublishMessage;
-      final raw   = MqttPublishPayload.bytesToStringAsString(msg.payload.message);
-
-      if (topic == 'home/ac/available_cmds') {
-        try {
-          var decoded = jsonDecode(raw);
-          if (decoded is String) decoded = jsonDecode(decoded);
-          setState(() => _commands = decoded as Map<String, dynamic>);
-        } catch (_) {
-          setState(() => _commands = {});
-        }
-      } else if (topic == 'home/ac/status') {
-        // refresh list after delete/rename/learn
-        if (raw.startsWith('Deleted') ||
-            raw.startsWith('Renamed') ||
-            raw.startsWith('Learned')) {
-          Future.delayed(const Duration(milliseconds: 500), _requestList);
-        }
-      }
-    });
-
-    // initial list fetch
     _requestList();
   }
 
-  void _onMessage(List<MqttReceivedMessage<MqttMessage>> events) {}
+  void _onDisconnected() {
+    setState(() {
+      _status   = 'Disconnected';
+      _commands = [];
+    });
+  }
+
+  void _onMessage(List<MqttReceivedMessage<MqttMessage?>> events) {
+    final rec   = events[0];
+    final topic = rec.topic;
+    final msg   = (rec.payload as MqttPublishMessage)
+                      .payload.message;
+    final raw   = MqttPublishPayload.bytesToStringAsString(msg);
+
+    if (topic == 'home/ac/status') {
+      setState(() => _status = raw);
+      if (raw.startsWith('Learned')) {
+        Future.delayed(const Duration(milliseconds: 500), _requestList);
+      }
+    }
+    else if (topic == 'home/ac/available_cmds') {
+      dynamic decoded = jsonDecode(raw);
+      if (decoded is String) decoded = jsonDecode(decoded);
+      final map = decoded as Map<String, dynamic>;
+      setState(() => _commands = map.keys.toList());
+    }
+  }
 
   void _requestList() {
-    final b = MqttClientPayloadBuilder()..addString('');
-    _client.publishMessage('home/ac/list', MqttQos.atLeastOnce, b.payload!);
+    final builder = MqttClientPayloadBuilder()..addString('');
+    _client.publishMessage('home/ac/list', MqttQos.atLeastOnce, builder.payload!);
   }
 
-  void _send(String name) {
-    final b = MqttClientPayloadBuilder()..addString(jsonEncode({'name': name}));
-    _client.publishMessage('home/ac/send', MqttQos.atLeastOnce, b.payload!);
+  void _sendCommand(String name) {
+    final builder = MqttClientPayloadBuilder()
+      ..addString(jsonEncode({'name': name}));
+    _client.publishMessage('home/ac/send', MqttQos.atLeastOnce, builder.payload!);
   }
 
-  void _delete(String name) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete Command'),
-        content: Text('Are you sure you want to delete "$name"?'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          ElevatedButton(onPressed: () {
-            final b = MqttClientPayloadBuilder()..addString(jsonEncode({'name': name}));
-            _client.publishMessage('home/ac/delete', MqttQos.atLeastOnce, b.payload!);
-            Navigator.pop(ctx);
-          }, child: const Text('Delete')),
-        ],
-      ),
-    );
-  }
+  void _sendEraseAll() {
+  final builder = MqttClientPayloadBuilder()..addString('');
+  _client.publishMessage('home/ac/erase_all', MqttQos.atLeastOnce, builder.payload!);
+}
+void _resetWiFi() {
+  final builder = MqttClientPayloadBuilder()..addString('reset');
+  _client.publishMessage('home/ac/reset_wifi', MqttQos.atLeastOnce, builder.payload!);
+}
 
-  void _rename(String oldName) async {
-    final ctrl = TextEditingController(text: oldName);
-    final newName = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Rename Command'),
-        content: TextField(
-          controller: ctrl,
-          decoration: const InputDecoration(hintText: 'New name'),
-          autofocus: true,
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          ElevatedButton(onPressed: () {
-            final text = ctrl.text.trim();
-            if (text.isNotEmpty && text != oldName) {
-              Navigator.pop(ctx, text);
-            }
-          }, child: const Text('Rename')),
-        ],
-      ),
-    );
-    if (newName != null) {
-      final b = MqttClientPayloadBuilder()
-        ..addString(jsonEncode({'old': oldName, 'new': newName}));
-      _client.publishMessage('home/ac/rename', MqttQos.atLeastOnce, b.payload!);
-    }
-  }
-
-  Future<void> _learnNew() async {
-    final ctrl = TextEditingController();
-    final name = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('New command name'),
-        content: TextField(controller: ctrl, decoration: const InputDecoration(hintText: 'e.g. POWER'), autofocus: true),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          ElevatedButton(onPressed: () {
-            final text = ctrl.text.trim();
-            if (text.isNotEmpty) Navigator.pop(ctx, text);
-          }, child: const Text('OK')),
-        ],
-      ),
-    );
-    if (name != null) {
-      final b = MqttClientPayloadBuilder()..addString(jsonEncode({'name': name}));
-      _client.publishMessage('home/ac/learn', MqttQos.atLeastOnce, b.payload!);
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
-    final names = _commands.keys.toList();
     return Scaffold(
       appBar: AppBar(
-        title: const Text('IR Commands'),
-        actions: [ IconButton(icon: const Icon(Icons.refresh), onPressed: _requestList) ],
+        title: const Text('IR MQTT Controller'),
+        actions: [
+          IconButton(icon: const Icon(Icons.refresh), onPressed: _requestList),
+          IconButton(icon: const Icon(Icons.delete), onPressed: _sendEraseAll, tooltip: 'Erase All Commands',),
+          IconButton(
+          icon: const Icon(Icons.settings_backup_restore),
+          tooltip: 'Reset Wi-Fi',
+          onPressed: () {
+            _resetWiFi();
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Reset command sent to ESP32'))
+            );
+          },
+  ),
+        ],
       ),
-      body: names.isEmpty
-          ? const Center(child: Text('No commands yet'))
-          : ListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: names.length,
-              itemBuilder: (ctx, i) {
-                final cmd = names[i];
-                return Card(
-                  margin: const EdgeInsets.symmetric(vertical: 4),
-                  child: ListTile(
-                    title: Text(cmd.toUpperCase()),
-                    leading: IconButton(
-                      icon: const Icon(Icons.send),
-                      onPressed: () => _send(cmd),
-                    ),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.edit),
-                          onPressed: () => _rename(cmd),
+      body: Column(
+        children: [
+          Container(
+            width: double.infinity,
+            color: Colors.grey[200],
+            padding: const EdgeInsets.all(12),
+            child: Text('Status: $_status'),
+          ),
+          Expanded(
+            child: _commands.isEmpty
+                ? const Center(child: Text('No commands learned yet.'))
+                : ListView.builder(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: _commands.length,
+                    itemBuilder: (ctx, i) {
+                      final cmd = _commands[i];
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: ElevatedButton(
+                          onPressed: () => _sendCommand(cmd),
+                          child: Text(cmd.toUpperCase()),
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.delete),
-                          onPressed: () => _delete(cmd),
-                        ),
-                      ],
-                    ),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _learnNew,
-        child: const Icon(Icons.add),
+          ),
+        ],
       ),
     );
   }
