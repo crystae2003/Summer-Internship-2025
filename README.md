@@ -1,7 +1,7 @@
 # Summer Internship 2025 – Cloud-Based Smart AC Control System
 
 ## Overview
-This project implements a **cloud-based AC control system** enabling **low-cost smart AC functionality**. Users can **monitor and control air conditioning units remotely** in real time using a mobile app over Wi-Fi. The system optimizes command execution latency and stores device data securely.
+This project implements a **cloud-based AC control system** enabling **low-cost smart AC functionality**. Smart ACs are generally expensive, so we use **ESP32 microcontrollers** to provide smart features at a low cost. Users can **monitor and control air conditioning units remotely** in real time using a mobile app over Wi-Fi. The system optimizes command execution latency and stores device data securely.
 
 ---
 
@@ -10,7 +10,7 @@ This project implements a **cloud-based AC control system** enabling **low-cost 
 - **Remote Control:** Adjust temperature and power state via the mobile app.  
 - **Optimized Command Execution:** MQTT-based messaging ensures near-instantaneous response.  
 - **Database Integration:** PostgreSQL stores command logs and device configurations.  
-- **Cloud Connectivity:** FastAPI backend handles API requests and MQTT communication.
+- **Cloud Connectivity:** FastAPI backend handles API requests and MQTT communication.  
 
 ---
 
@@ -19,7 +19,8 @@ This project implements a **cloud-based AC control system** enabling **low-cost 
 - **Backend:** FastAPI (Python)  
 - **Database:** PostgreSQL  
 - **Messaging:** Mosquitto MQTT Broker  
+- **IoT Device:** ESP32 (used for cost-effective smart AC control)
 
+---
 
-
-
+## Architecture
