@@ -21,6 +21,4 @@ This project implements a **cloud-based AC control system** enabling **low-cost 
 - **Messaging:** Mosquitto MQTT Broker  
 - **IoT Device:** ESP32 (used for cost-effective smart AC control)
 
----
 
-## Architecture
