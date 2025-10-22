@@ -20,22 +20,6 @@ This project implements a **cloud-based AC control system** enabling **low-cost 
 - **Database:** PostgreSQL  
 - **Messaging:** Mosquitto MQTT Broker  
 
----
 
-## Architecture
-Mobile App (Flutter)
-│
-▼
-FastAPI Backend
-│
-▼
-Mosquitto MQTT Broker
-│
-▼
-AC Unit (IoT Device)
-
-- Mobile app communicates with the FastAPI backend via REST APIs.  
-- Backend publishes commands to the MQTT broker for AC units.  
-- AC units send status updates back to the backend via MQTT, which updates the app.  
 
 
